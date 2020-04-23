@@ -201,9 +201,9 @@ def capacity():
 def cases():
     # Data source Open Data Collab
     url = "https://raw.githubusercontent.com/ishaberry/Covid19Canada/master/cases.csv"
+    cases = {case.case_id:case for case in Covid.query.all()}
     r = requests.get(url, stream=True)
     for row in csv.DictReader(r.iter_lines(decode_unicode=True)):
-    # for index, row in df.iterrows():
         case_id = row['case_id']
         age = row['age']
         sex = row['sex']
@@ -214,11 +214,11 @@ def cases():
         date = datetime.strptime(date,"%d-%m-%Y")
         travel = row['travel_yn']
         travelh = row['travel_history_country']
-        c = Covid.query.filter_by(case_id=case_id).first()
-        if not c:
+        if case_id not in cases:
             c = Covid(case_id=case_id, age=age, sex=sex, region=region, province=province, country=country, date=date, travel=travel, travelh=travelh)
             db.session.add(c)
         else:
+            c = cases.get(case_id)
             if not all((
                 (c.age == age),
                 (c.sex == sex),
@@ -409,17 +409,26 @@ def getcanadamobility_apple():
 
 def getgovernmentresponse():
     url = "https://ocgptweb.azurewebsites.net/CSVDownload"
+    gov_responses = {(gr.date,gr.country):gr for gr in GovernmentResponse.query.all()}
     r = requests.get(url, stream=True)
 
-    def parse_val(val):
-        if val == -1:
+    def is_number(s):
+        try:
+            float(s)
+            return True
+        except (ValueError,TypeError):
+            return False
+
+    def parse_val(val,num_func=float):
+        if val == "":
             return sql.null()
+        elif is_number(val):
+            return num_func(val)
         else:
             return val
 
     for row in csv.DictReader(r.iter_lines(decode_unicode=True)):
-    # for index, row in df.iterrows():
-        date = row['Date']
+        date = pd.to_datetime(row['Date'], format="%Y%m%d")
         country = row['CountryName']
         country_code = row['CountryCode']
         s1_school_closing = parse_val(row['S1_School closing'])
@@ -459,8 +468,7 @@ def getgovernmentresponse():
         stringency_index = parse_val(row['StringencyIndex'])
         stringency_index_for_display = parse_val(row['StringencyIndexForDisplay'])
 
-        g = GovernmentResponse.query.filter_by(date=date, country=country).first()
-        if not g:
+        if (date,country) not in gov_responses:
             g = GovernmentResponse(
                 date=date, 
                 country=country, 
