@@ -11,7 +11,6 @@ import pandas as pd
 import numpy as np
 import io
 import os
-from bs4 import BeautifulSoup
 import urllib.request
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -20,6 +19,9 @@ from app.tools.covidpdftocsv import covidpdftocsv
 import math
 from sqlalchemy import text
 from sqlalchemy import sql
+import csv
+from app.export import sheetsHelper
+import re
 
 ########################################
 ############ONTARIO DATA################
@@ -33,8 +35,10 @@ def testsnew():
     df['Reported Date'] = pd.to_datetime(df['Reported Date'])
     date_include = datetime.strptime("2020-02-04","%Y-%m-%d")
     df = df.loc[df['Reported Date'] > date_include]
-
+    print('ontario testing data being refreshed')
     for index, row in df.iterrows():
+        if (index % 100) == 0:
+            print(f'{index} / {df.tail(1).index.values[0]} passed')
         date = row['Reported Date']
         negative = row['Confirmed Negative']
         investigation = row['Under Investigation']
@@ -93,7 +97,10 @@ def getnpis():
     df['end_date'] = pd.to_datetime(df['end_date'])
     df.dropna(subset=['start_date'],inplace=True)
     df = df.fillna("NULL")
+    print('npi canada data being refreshed')
     for index, row in df.iterrows():
+        if (index % 100) == 0:
+            print(f'{index} / {df.tail(1).index.values[0]} passed')
         start_date = row['start_date']
         end_date = row['end_date']
         country = row['country']
@@ -161,16 +168,14 @@ def getnpis():
         db.session.commit()
     return
 
-def capacityicu():
+def capacityicu(date):
     df = pd.read_csv('CCSO.csv')
-    date = "15-04-2020"
-    date = datetime.strptime(date,"%d-%m-%Y")
     for index, row in df.iterrows():
         region = row['Region']
         lhin = row['LHIN']
         critical_care_beds = row['# Critical Care Beds']
         critical_care_patients = row['# Critical Care Patients']
-        vented_beds = row['# Baseline Vented Beds'] + row['# Expanded Vented Beds']
+        vented_beds = row['# Expanded Vented Beds']
         vented_patients = row['# Vented Patients']
         suspected_covid = row['# Suspected COVID-19']
         confirmed_positive = row['# Confirmed Positive COVID-19']
@@ -217,6 +222,7 @@ def cases():
         if case_id not in cases:
             c = Covid(case_id=case_id, age=age, sex=sex, region=region, province=province, country=country, date=date, travel=travel, travelh=travelh)
             db.session.add(c)
+            db.session.commit()
         else:
             c = cases.get(case_id)
             if not all((
@@ -238,7 +244,7 @@ def cases():
                 c.travel = travel
                 c.travelh = travelh
                 db.session.add(c)
-    db.session.commit()
+                db.session.commit()
     return
 
 def getcanadamortality():
@@ -248,7 +254,10 @@ def getcanadamortality():
     df['date'] = pd.to_datetime(df['date_death_report'],dayfirst=True)
     df = df.fillna("NULL")
     df = df.replace("NA", "NULL")
+    print('canada mortality data being refreshed')
     for index, row in df.iterrows():
+        if (index % 100) == 0:
+            print(f'{index} / {df.tail(1).index.values[0]} passed')
         death_id = row['death_id']
         province_death_id = row['province_death_id']
         age = row['age']
@@ -286,7 +295,10 @@ def getcanadarecovered():
     df = pd.read_csv(io.StringIO(s.decode('utf-8')))
     df['date_recovered'] = pd.to_datetime(df['date_recovered'],dayfirst=True)
     df = df.fillna(-1)
+    print('canada recovered data being refreshed')
     for index, row in df.iterrows():
+        if (index % 100) == 0:
+            print(f'{index} / {df.tail(1).index.values[0]} passed')
         date = row['date_recovered']
         province = row['province']
         cumulative_recovered = row['cumulative_recovered']
@@ -296,6 +308,8 @@ def getcanadarecovered():
 
         db.session.add(c)
         db.session.commit()
+        if (index % 100) == 0:
+            print(f'{index} / {df.tail(1).index.values[0]} passed')
     return
 
 def getcanadatested():
@@ -304,7 +318,10 @@ def getcanadatested():
     df = pd.read_csv(io.StringIO(s.decode('utf-8')))
     df['date_testing'] = pd.to_datetime(df['date_testing'],dayfirst=True)
     df = df.fillna(-1)
+    print('canada testing counts being refreshed')
     for index, row in df.iterrows():
+        if (index % 100) == 0:
+            print(f'{index} / {df.tail(1).index.values[0]} passed')
         date = row['date_testing']
         province = row['province']
         cumulative_testing = row['cumulative_testing']
@@ -314,97 +331,106 @@ def getcanadatested():
 
         db.session.add(c)
         db.session.commit()
+        if (index % 100) == 0:
+            print(f'{index} / {df.tail(1).index.values[0]} passed')
     return
 
 def getcanadamobility_google():
-    start_date = None
-    end_date = datetime.today()
+    # From global data
+    try:
+        url = 'https://www.gstatic.com/covid19/mobility/Global_Mobility_Report.csv'
+        s=requests.get(url).content
+        df = pd.read_csv(io.StringIO(s.decode('utf-8')))
+        df = df.loc[df.country_region == 'Canada']
+        print('google mobility data being refreshed')
+        for index, row in df.iterrows():
+            if (index % 100) == 0:
+                print(f'{index} / {df.tail(1).index.values[0]} passed')
+            region = row['country_region']
+            subregion = row['sub_region_1']
+            date = row['date']
+            if region == 'Canada':
+                if subregion is not '':
+                    region = subregion
 
-    max_date = Mobility.query.order_by(text('date desc')).limit(1).first()
-    if not max_date:
-        start_date = end_date + timedelta(-30)
-    else:
-        start_date = max_date.date# + timedelta(1)
+                def add_transport(date, region, transportation_type, value):
+                    if value == '':
+                        value = -999
+                    if region != region:
+                        region = 'Canada'
+                    m = MobilityTransportation.query.filter_by(date=date, region=region, transportation_type=transportation_type).limit(1).first()
+                    if not m:
+                        m = MobilityTransportation(date=date, region=region, transportation_type=transportation_type, value=value)
+                        print("Add transport mobility data for region: {}, date: {}, type: {}, value: {}".format(region, date, transportation_type, value))
+                        db.session.add(m)
 
-    datesToTry = [start_date + timedelta(x) for x in range(int((end_date - start_date).days))]
+                add_transport(date, region, 'Retail & recreation', row['retail_and_recreation_percent_change_from_baseline'])
+                add_transport(date, region, 'Grocery & pharmacy', row['grocery_and_pharmacy_percent_change_from_baseline'])
+                add_transport(date, region, 'Parks', row['parks_percent_change_from_baseline'])
+                add_transport(date, region, 'Transit stations', row['transit_stations_percent_change_from_baseline'])
+                add_transport(date, region, 'Workplace', row['workplaces_percent_change_from_baseline'])
+                add_transport(date, region, 'Residential', row['residential_percent_change_from_baseline'])
+            db.session.commit()
 
-    #EXAMPLE: https://www.gstatic.com/covid19/mobility/2020-03-29_CA_Mobility_Report_en.pdf
-    for dt in datesToTry:
-        try:
-            datetag = dt.strftime('%Y-%m-%d')
-            filename = datetag +  '_CA_Mobility_Report_en.csv'
-            if os.path.exists(filename):
-                df = pd.read_csv(filename)
-
-                # Get all date columns (i.e. not kind, name, category) and insert record for each
-                date_columns = [x for x in list(df.columns) if x not in ['Kind', 'Name', 'Category']]
-
-                for index, row in df.iterrows():
-                    for col in date_columns:
-                        region = row['Name']
-                        category = row['Category']
-                        value = row[col]
-                        if math.isnan(value):
-                            continue
-
-                        m = Mobility.query.filter_by(date=col, region=region, category=category).limit(1).first()
-                        if not m:
-                            m = Mobility(date=col, region=region, category=category, value=value)
-                            print("Add mobility data for region: {}, category: {}, date: {}".format(region, category, col))
-                            db.session.add(m)
-                            db.session.commit()
-        except Exception as err:
-            print("failed to get data for {}".format(dt), err)
+    except Exception as err:
+        print("failed to get data", err)
     return
 
 def getcanadamobility_apple():
-    start_date = None
-    end_date = datetime.today()
-
-    max_date = MobilityTransportation.query.order_by(text('date desc')).limit(1).first()
-    if not max_date:
-        start_date = end_date + timedelta(-14)
-    else:
-        start_date = max_date.date# + timedelta(1)
-
-    datesToTry = [start_date + timedelta(x) for x in range(int((end_date - start_date).days))]
-
-    base_url = 'https://covid19-static.cdn-apple.com/covid19-mobility-data/2005HotfixDev13/v1/en-us/applemobilitytrends-'
-    regions = ['Toronto', 'Vancouver', 'Canada', 'Calgary', 'Edmonton', 'Halifax', 'Montreal', 'Ottawa']
-
-    #EXAMPLE https://covid19-static.cdn-apple.com/covid19-mobility-data/2005HotfixDev13/v1/en-us/applemobilitytrends-2020-04-13.csv
-    for dt in datesToTry:
+    options = Options()
+    options.headless = True
+    options.add_argument('--disable-gpu')
+    options.add_argument('--no-sandbox')
+    driver = webdriver.Chrome(options=options)
+    urlpage = "https://www.apple.com/covid19/mobility"
+    driver.implicitly_wait(100)
+    driver.get(urlpage)
+    button = None
+    url = None
+    tries = 3
+    while url == None and tries > 0:
+        tries -= 1
+        driver.implicitly_wait(100)
         try:
-            datetag = dt.strftime('%Y-%m-%d')
-            url = '{}{}.csv'.format(base_url, datetag)
-            df = None
-            try:
-                s = requests.get(url).content
-                df = pd.read_csv(io.StringIO(s.decode('utf-8')))
-            except:
-                continue
+            button = driver.find_elements_by_class_name("download-button-container")[0]
+            url = button.find_element_by_tag_name('a').get_attribute('href')
+        except:
+            continue
 
-            df = df[df['region'].isin(regions)]
+    if url is None:
+        print("Failed to find download button")
+        driver.quit()
+        return
 
-            # Get all date columns (i.e. not kind, name, category) and insert record for each
-            date_columns = [x for x in list(df.columns) if x not in ['geo_type', 'region', 'transportation_type']]
+    regions = ['Ontario']
 
-            for index, row in df.iterrows():
-                region = row['region']
-                transport = row['transportation_type']
-                for col in date_columns:
-                    value = row[col]
-                    if math.isnan(value):
-                        continue
+    try:
+        s = requests.get(url).content
+        df = pd.read_csv(io.StringIO(s.decode('utf-8')))
+        df = df[df['region'].isin(regions)]
 
+        # Get all date columns (i.e. not kind, name, category) and insert record for each
+        date_columns = [x for x in list(df.columns) if x not in ['geo_type', 'region', 'transportation_type']]
+        print('Apple mobility data being refreshed')
+        for index, row in df.iterrows():
+            if (index % 100) == 0:
+                print(f'{index} / {df.tail(1).index.values[0]} passed')
+            region = row['region']
+            transport = row['transportation_type']
+            for col in date_columns:
+                value = row[col]
+                if math.isnan(value):
+                    continue
+                if region==region:
                     m = MobilityTransportation.query.filter_by(date=col, region=region, transportation_type=transport).limit(1).first()
                     if not m:
                         m = MobilityTransportation(date=col, region=region, transportation_type=transport, value=value)
                         print("Add transport mobility data for region: {}, transport: {}, date: {}, value: {}".format(region, transport, col, value))
                         db.session.add(m)
                         db.session.commit()
-        except Exception as err:
-            print("failed to get data for {}".format(dt), err)
+    except Exception as err:
+        print("failed to get apple data", err)
+    driver.quit()
     return
 
 def getgovernmentresponse():
@@ -470,8 +496,8 @@ def getgovernmentresponse():
 
         if (date,country) not in gov_responses:
             g = GovernmentResponse(
-                date=date, 
-                country=country, 
+                date=date,
+                country=country,
                 country_code=country_code,
                 s1_school_closing=s1_school_closing,
                 s2_workplace_closing=s2_workplace_closing,
@@ -511,9 +537,73 @@ def getgovernmentresponse():
                 stringency_index_for_display=stringency_index_for_display)
 
             db.session.add(g)
-
-    db.session.commit()
+            db.session.commit()
     return
+
+def getlongtermcare():
+    options = Options()
+    options.headless = True
+    options.add_argument('--disable-gpu')
+    options.add_argument('--no-sandbox')
+    driver = webdriver.Chrome(options=options)
+    urlpage = "https://www.ontario.ca/page/how-ontario-is-responding-covid-19"
+    driver.implicitly_wait(30)
+    driver.get(urlpage)
+    tables = driver.find_elements_by_tag_name("table")
+
+    def parseNum(num):
+        return int(num.replace('<', ''))
+
+    ltc_mapping = {}
+    #https://docs.google.com/spreadsheets/d/1Pvj5_Y288_lmX_YsOm82gYkJw7oN-tPTz70FwdUUU5A/edit?usp=sharing
+    #https://www.phdapps.health.gov.on.ca/PHULocator/Results.aspx
+    for row in sheetsHelper.readSheet('HowsMyFlattening - Mappings', 'CityToPHU'):
+        city = row[0]
+        phu = row[1]
+        ltc_mapping[city] = phu
+
+    try:
+        for table in tables:
+            headers = [x.text for x in table.find_element_by_tag_name('thead').find_elements_by_tag_name('th')]
+
+            # Isolate table we care about
+            # Match first 3 headers we know
+            if headers[0] != 'LTC Home' or headers[1] != 'City' or headers[2] != 'Beds':
+                continue
+
+            rows = table.find_element_by_tag_name('tbody').find_elements_by_tag_name('tr')
+
+            for row in rows:
+                row_values = [x.text for x in row.find_elements_by_tag_name('td')]
+                date = datetime.now().strftime("%Y-%m-%d")
+                home = row_values[0].replace('""','')
+                city = row_values[1]
+                beds = parseNum(row_values[2])
+                confirmed_resident_cases = parseNum(row_values[3])
+                resident_deaths = parseNum(row_values[4])
+                confirmed_staff_cases = parseNum(row_values[4])
+                phu = ''
+                if city in ltc_mapping:
+                    phu = ltc_mapping[city]
+                l = LongTermCare.query.filter_by(date=date, home=home).first()
+                if not l:
+                    l = LongTermCare(
+                        date=date,
+                        home=home,
+                        city=city,
+                        beds=beds,
+                        confirmed_resident_cases=confirmed_resident_cases,
+                        resident_deaths=resident_deaths,
+                        confirmed_staff_cases=confirmed_staff_cases,
+                        phu=phu)
+                    db.session.add(l)
+            db.session.commit()
+            break
+    except:
+        print('Failed to extract LTC data from ontario.ca')
+        values = []
+
+    driver.quit()
 
 
 ########################################
@@ -529,7 +619,10 @@ def international():
     df = df.drop(['Lat', 'Long', 'Province/State'], axis=1).groupby("Country/Region").sum().T
     df = df.diff().reset_index()
     df['Date']= pd.to_datetime(df['index'])
+    print('international case data being refreshed')
     for index, row in df.iterrows():
+        if (index % 100) == 0:
+            print(f'{index} / {df.tail(1).index.values[0]} passed')
         date = row['Date']
         for country in countries:
             cases = row[country]
@@ -551,7 +644,10 @@ def getinternationalmortality():
     df = df.drop(['Lat', 'Long', 'Province/State'], axis=1).groupby("Country/Region").sum().T
     df = df.diff().reset_index()
     df['Date']= pd.to_datetime(df['index'])
+    print('international mortality data being refreshed')
     for index, row in df.iterrows():
+        if (index % 100) == 0:
+            print(f'{index} / {df.tail(1).index.values[0]} passed')
         date = row['Date']
         for country in countries:
             cases = row[country]
@@ -573,7 +669,10 @@ def getinternationalrecovered():
     df = df.drop(['Lat', 'Long', 'Province/State'], axis=1).groupby("Country/Region").sum().T
     df = df.diff().reset_index()
     df['Date']= pd.to_datetime(df['index'])
+    print('international recovered data being refreshed')
     for index, row in df.iterrows():
+        if (index % 100) == 0:
+            print(f'{index} / {df.tail(1).index.values[0]} passed')
         date = row['Date']
         for country in countries:
             cases = row[country]
@@ -592,7 +691,10 @@ def getinternationaltested():
     df = pd.read_csv(io.StringIO(s.decode('utf-8')))
     df['Date'] = pd.to_datetime(df['Date'])
     df = df.fillna(-1)
+    print('international testing data being refreshed')
     for index, row in df.iterrows():
+        if (index % 100) == 0:
+            print(f'{index} / {df.tail(1).index.values[0]} passed')
         date = row['Date']
         region = row['Entity'].split('-')[0]
         cumulative_testing = row['Cumulative total']
@@ -631,7 +733,10 @@ def getnpiusa():
             return sql.null()
 
     df = df.fillna(-1)
+    print('npi us data being refreshed')
     for index, row in df.iterrows():
+        if (index % 100) == 0:
+            print(f'{index} / {df.tail(1).index.values[0]} passed')
         start_date = row['start_date']
         end_date = row['end_date']
         county = row['county']
@@ -690,13 +795,19 @@ def new_viz():
         text = row['text']
         mobileHeight = row['mobileHeight']
         desktopHeight = row['desktopHeight']
+        page = row['page']
+        order = row['order']
+        row_z = row['row']
+        column = row['column']
+        phu = row['phu']
+        tab_order = row['tab_order']
 
-
-        c = Viz.query.filter_by(header=header).first()
+        c = Viz.query.filter_by(header=header, phu=phu).first()
         if not c:
             c = Viz(header=header, category=category, content=content,
             viz=viz, thumbnail=thumbnail, text=text, mobileHeight=mobileHeight,
-            desktopHeight=desktopHeight)
+            desktopHeight=desktopHeight, page=page, order=order, row=row_z,
+            column=column, phu=phu, tab_order=tab_order)
             db.session.add(c)
             db.session.commit()
         else:
@@ -707,6 +818,11 @@ def new_viz():
             c.desktopHeight = desktopHeight
             c.thumbnail = thumbnail
             c.text=text
+            c.page=page
+            c.order = order
+            c.row = row_z
+            c.column = column
+            c.tab_order = tab_order
             db.session.add(c)
             db.session.commit()
     return 'success',200
@@ -724,6 +840,8 @@ def new_source():
     data = io.StringIO(s.decode('utf-8'))
     df = pd.read_csv(data)
     for index, row in df.iterrows():
+        region = row['Region']
+        type = row['Type']
         name = row['Name']
         source = row['Source']
         description = row['Description']
@@ -736,12 +854,14 @@ def new_source():
 
         c = Source.query.filter_by(name=name).first()
         if not c:
-            c = Source(name=name, source=source, description=description,
+            c = Source(region=region, type=type, name=name, source=source, description=description,
             data_feed_type=data_feed_type, link=link, refresh=refresh,
             contributor=contributor, contact=contact, download=download)
             db.session.add(c)
             db.session.commit()
         else:
+            c.region = region
+            c.type = type
             c.source = source
             c.description = description
             c.data_feed_type = data_feed_type
